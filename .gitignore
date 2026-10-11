@@ -1,0 +1,41 @@
+# Operating System files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Executables & Compiled Artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+dist/
+bin/
+
+# Temporary and Cache files
+*.tmp
+*.bak
+*.swp
+*~
+.wrangler/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# Secrets, Environment & Credentials
+.env
+.env.*
+*.pem
+*.key
+*.token
+*.credentials
+.secrets/
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
