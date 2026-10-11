@@ -25,7 +25,7 @@ jobs:
           $errors = $null
           $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
           if ($errors.Count -gt 0) {
-            Write-Error "Syntax errors detected in $scriptPath:"
+            Write-Error "Syntax errors detected in ${scriptPath}:"
             $errors | ForEach-Object { Write-Error $_.Message }
             exit 1
           }
