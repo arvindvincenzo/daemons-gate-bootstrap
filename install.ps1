@@ -17,7 +17,8 @@ param(
     [string]$LocalSource = "",
     [string]$CustomBaseUrl = "",
     [string]$InstallDir = "",
-    [switch]$SkipPathRegistration
+    [switch]$SkipPathRegistration,
+    [string]$SimulateRollbackCleanupFailure = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -266,37 +267,90 @@ try {
 
         $rollbackErrors = @()
 
+        $mockCleanupFail = $SimulateRollbackCleanupFailure
+        if ([string]::IsNullOrWhiteSpace($mockCleanupFail)) {
+            $mockCleanupFail = [System.Environment]::GetEnvironmentVariable("DG_TEST_INJECT_CLEANUP_FAILURE")
+        }
+
         # Rollback TargetExe
         try {
             if ($origState.TargetExeExists) {
                 Copy-Item -Path $backupTargetExe -Destination $TargetExe -Force -ErrorAction Stop
+                if (!(Test-Path $TargetExe -PathType Leaf)) {
+                    throw "Original dg.exe was not restored after rollback."
+                }
+                $restoredHash = (Get-FileHash $TargetExe -Algorithm SHA256).Hash
+                $backupHash = (Get-FileHash $backupTargetExe -Algorithm SHA256).Hash
+                if ($restoredHash -ne $backupHash) {
+                    throw "Restored dg.exe checksum mismatch ($restoredHash vs expected $backupHash)."
+                }
             } else {
-                if (Test-Path $TargetExe -PathType Leaf) { Remove-Item -Force $TargetExe -ErrorAction SilentlyContinue }
+                if ($mockCleanupFail -eq "1" -or $mockCleanupFail -eq "dg.exe") {
+                    throw "Simulated cleanup failure on dg.exe: Access is denied (injected for regression testing)"
+                }
+                if (Test-Path $TargetExe -PathType Leaf) {
+                    Remove-Item -Force $TargetExe -ErrorAction Stop
+                }
+                if (Test-Path $TargetExe -PathType Leaf) {
+                    throw "Newly deployed dg.exe could not be removed during rollback (file still exists at $TargetExe)."
+                }
             }
         } catch {
-            $rollbackErrors += "Failed to restore dg.exe: $($_.Exception.Message)"
+            $rollbackErrors += "Failed to rollback dg.exe: $($_.Exception.Message)"
         }
 
         # Rollback TargetAlias
         try {
             if ($origState.TargetAliasExists) {
                 Copy-Item -Path $backupTargetAlias -Destination $TargetAlias -Force -ErrorAction Stop
+                if (!(Test-Path $TargetAlias -PathType Leaf)) {
+                    throw "Original daemons-gate.exe alias was not restored after rollback."
+                }
+                $restoredHash = (Get-FileHash $TargetAlias -Algorithm SHA256).Hash
+                $backupHash = (Get-FileHash $backupTargetAlias -Algorithm SHA256).Hash
+                if ($restoredHash -ne $backupHash) {
+                    throw "Restored daemons-gate.exe alias checksum mismatch ($restoredHash vs expected $backupHash)."
+                }
             } else {
-                if (Test-Path $TargetAlias -PathType Leaf) { Remove-Item -Force $TargetAlias -ErrorAction SilentlyContinue }
+                if ($mockCleanupFail -eq "daemons-gate.exe") {
+                    throw "Simulated cleanup failure on daemons-gate.exe: Access is denied (injected for regression testing)"
+                }
+                if (Test-Path $TargetAlias -PathType Leaf) {
+                    Remove-Item -Force $TargetAlias -ErrorAction Stop
+                }
+                if (Test-Path $TargetAlias -PathType Leaf) {
+                    throw "Newly deployed daemons-gate.exe alias could not be removed during rollback (file still exists at $TargetAlias)."
+                }
             }
         } catch {
-            $rollbackErrors += "Failed to restore daemons-gate.exe alias: $($_.Exception.Message)"
+            $rollbackErrors += "Failed to rollback daemons-gate.exe alias: $($_.Exception.Message)"
         }
 
         # Rollback ChecksumFile
         try {
             if ($origState.ChecksumFileExists) {
                 Copy-Item -Path $backupChecksumFile -Destination $ChecksumFile -Force -ErrorAction Stop
+                if (!(Test-Path $ChecksumFile -PathType Leaf)) {
+                    throw "Original SHA256SUMS.txt was not restored after rollback."
+                }
+                $restoredHash = (Get-FileHash $ChecksumFile -Algorithm SHA256).Hash
+                $backupHash = (Get-FileHash $backupChecksumFile -Algorithm SHA256).Hash
+                if ($restoredHash -ne $backupHash) {
+                    throw "Restored SHA256SUMS.txt checksum mismatch ($restoredHash vs expected $backupHash)."
+                }
             } else {
-                if (Test-Path $ChecksumFile -PathType Leaf) { Remove-Item -Force $ChecksumFile -ErrorAction SilentlyContinue }
+                if ($mockCleanupFail -eq "SHA256SUMS.txt") {
+                    throw "Simulated cleanup failure on SHA256SUMS.txt: Access is denied (injected for regression testing)"
+                }
+                if (Test-Path $ChecksumFile -PathType Leaf) {
+                    Remove-Item -Force $ChecksumFile -ErrorAction Stop
+                }
+                if (Test-Path $ChecksumFile -PathType Leaf) {
+                    throw "Newly deployed SHA256SUMS.txt could not be removed during rollback (file still exists at $ChecksumFile)."
+                }
             }
         } catch {
-            $rollbackErrors += "Failed to restore SHA256SUMS.txt: $($_.Exception.Message)"
+            $rollbackErrors += "Failed to rollback SHA256SUMS.txt: $($_.Exception.Message)"
         }
 
         if ($rollbackErrors.Count -gt 0) {

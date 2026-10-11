@@ -92,6 +92,19 @@ function Run-Test {
 
 try {
     # --------------------------------------------------------------------------
+    # TEST 0: PowerShell AST Syntax Validation
+    # --------------------------------------------------------------------------
+    Run-Test "0. install.ps1 syntax and AST validation" {
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($InstallerPath, [ref]$tokens, [ref]$parseErrors)
+        if ($parseErrors.Count -gt 0) {
+            $errMsgs = ($parseErrors | ForEach-Object { $_.Message }) -join "; "
+            throw "install.ps1 AST parser errors: $errMsgs"
+        }
+    }
+
+    # --------------------------------------------------------------------------
     # TEST 1: Valid executable and matching manifest install successfully
     # --------------------------------------------------------------------------
     Run-Test "1. Valid executable and matching manifest install successfully" {
@@ -418,6 +431,55 @@ try {
         }
         if ($afterHash -eq $srcHash) {
             throw "Candidate binary was retained after rollback!"
+        }
+    }
+
+    # --------------------------------------------------------------------------
+    # TEST 13: Rollback cleanup failure reports incomplete rollback and exits non-zero
+    # --------------------------------------------------------------------------
+    Run-Test "13. Rollback cleanup failure is reported as error and never falsely reports success" {
+        $sandboxDir = Join-Path $TestWorkspace "test13_target_post_fail"
+        New-Item -ItemType Directory -Force -Path $sandboxDir | Out-Null
+
+        # Target directory initially has no installed files
+        $targetExe = Join-Path $sandboxDir "dg.exe"
+        if (Test-Path $targetExe) { Remove-Item -Force $targetExe }
+
+        $srcDir = Join-Path $TestWorkspace "test13_src"
+        New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
+        $candidateSource = Join-Path $srcDir "dg.exe"
+        Copy-Item -Path $ConditionalMockExe -Destination $candidateSource -Force
+        $candidateHash = (Get-FileHash $candidateSource -Algorithm SHA256).Hash
+        "$candidateHash  dg.exe" | Set-Content (Join-Path $srcDir "SHA256SUMS.txt")
+
+        # Invoke installer simulating cleanup failure on newly created dg.exe during rollback
+        $res = Invoke-Installer @(
+            "-UseLocalStaging",
+            "-LocalSource", $candidateSource,
+            "-InstallDir", $sandboxDir,
+            "-SkipPathRegistration",
+            "-SimulateRollbackCleanupFailure", "dg.exe"
+        )
+
+        # 1. Must exit non-zero
+        if ($res.ExitCode -eq 0) {
+            throw "Installer returned exit code 0 despite rollback cleanup failure!"
+        }
+
+        # 2. Must NEVER report successful installation or successful rollback
+        if ($res.Output -match "Daemons Gate installation complete") {
+            throw "Installer falsely reported installation complete!"
+        }
+        if ($res.Output -match "successfully rolled back to original state") {
+            throw "Installer falsely reported successful rollback despite cleanup failure!"
+        }
+
+        # 3. Must report rollback errors explicitly
+        if ($res.Output -notmatch "Rollback encountered errors") {
+            throw "Installer did not report rollback errors in output: $($res.Output)"
+        }
+        if ($res.Output -notmatch "Failed to rollback dg\.exe") {
+            throw "Installer did not report specific dg.exe rollback failure in output: $($res.Output)"
         }
     }
 
