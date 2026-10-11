@@ -27,177 +27,244 @@ Write-Host ">>> Verified autonomous engineering. Controlled execution. Reliable 
 Write-Host ">>> Website: https://arvindvincenzo.com/daemonsgate" -ForegroundColor Gray
 Write-Host ""
 
-# Determine target directory
+# Determine target installation directory
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
     $InstallDir = "$env:USERPROFILE\.daemons-gate\bin"
-}
-
-if (!(Test-Path $InstallDir)) {
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 }
 
 $TargetExe = Join-Path $InstallDir "dg.exe"
 $TargetAlias = Join-Path $InstallDir "daemons-gate.exe"
 $ChecksumFile = Join-Path $InstallDir "SHA256SUMS.txt"
 
-$downloadSuccess = $false
+# Isolated temporary workspace for candidate download and verification
+$TempWorkspace = Join-Path ([System.IO.Path]::GetTempPath()) "dg_install_$(Get-Random)"
+New-Item -ItemType Directory -Force -Path $TempWorkspace | Out-Null
 
-if ($UseLocalStaging) {
-    Write-Host ">>> Developer mode enabled: using local staging binary..." -ForegroundColor Yellow
-    if ([string]::IsNullOrWhiteSpace($LocalSource) -or !(Test-Path $LocalSource)) {
-        Write-Host "FATAL: Local source binary not found at '$LocalSource'" -ForegroundColor Red
-        exit 1
-    }
-    Copy-Item -Path $LocalSource -Destination $TargetExe -Force
-    $LocalChecksum = Join-Path (Split-Path $LocalSource) "SHA256SUMS.txt"
-    if (Test-Path $LocalChecksum) {
-        Copy-Item -Path $LocalChecksum -Destination $ChecksumFile -Force
-    }
-    $downloadSuccess = $true
-} else {
-    # Official Remote Distribution Endpoints
-    $Endpoints = @()
-    if ($CustomBaseUrl -ne "") {
-        $Endpoints += $CustomBaseUrl.TrimEnd('/')
-    }
-    $Endpoints += "https://arvindvincenzo.com/downloads"
+$CandidateExe = Join-Path $TempWorkspace "candidate_dg.exe"
+$CandidateManifest = Join-Path $TempWorkspace "candidate_SHA256SUMS.txt"
 
-    foreach ($base in $Endpoints) {
-        try {
-            Write-Host ">>> Connecting to secure distribution mirror: $base..." -ForegroundColor Gray
-            $exeUrl = "$base/dg.exe"
-            $sumUrl = "$base/SHA256SUMS.txt"
+try {
+    $downloadSuccess = $false
 
-            $tmpExe = "$TargetExe.tmp"
-            $tmpSum = "$ChecksumFile.tmp"
+    if ($UseLocalStaging) {
+        Write-Host ">>> Developer mode enabled: using local staging binary..." -ForegroundColor Yellow
+        if ([string]::IsNullOrWhiteSpace($LocalSource) -or !(Test-Path $LocalSource)) {
+            Write-Host "FATAL: Local source binary not found at '$LocalSource'" -ForegroundColor Red
+            exit 1
+        }
+        Copy-Item -Path $LocalSource -Destination $CandidateExe -Force
 
-            if (Test-Path $tmpExe) { Remove-Item -Force $tmpExe }
-            if (Test-Path $tmpSum) { Remove-Item -Force $tmpSum }
+        # Look for matching SHA256SUMS.txt in local source directory
+        $LocalDir = Split-Path -Parent (Resolve-Path $LocalSource)
+        $LocalManifest = Join-Path $LocalDir "SHA256SUMS.txt"
+        if (!(Test-Path $LocalManifest)) {
+            Write-Host "FATAL: Local staging manifest missing at '$LocalManifest'. Rejecting unverified local staging." -ForegroundColor Red
+            exit 1
+        }
+        Copy-Item -Path $LocalManifest -Destination $CandidateManifest -Force
+        $downloadSuccess = $true
+    } else {
+        # Official Remote Distribution Endpoints
+        $Endpoints = @()
+        if ($CustomBaseUrl -ne "") {
+            $Endpoints += $CustomBaseUrl.TrimEnd('/')
+        }
+        $Endpoints += "https://arvindvincenzo.com/downloads"
 
-            $webClient = New-Object System.Net.WebClient
-            $webClient.Headers.Add("User-Agent", "DaemonsGate-Installer/1.0 (Windows NT; x64)")
+        foreach ($base in $Endpoints) {
+            try {
+                Write-Host ">>> Connecting to secure distribution mirror: $base..." -ForegroundColor Gray
+                $exeUrl = "$base/dg.exe"
+                $sumUrl = "$base/SHA256SUMS.txt"
 
-            Write-Host ">>> Downloading SHA-256 integrity manifest..." -ForegroundColor Gray
-            $webClient.DownloadFile($sumUrl, $tmpSum)
+                if (Test-Path $CandidateExe) { Remove-Item -Force $CandidateExe }
+                if (Test-Path $CandidateManifest) { Remove-Item -Force $CandidateManifest }
 
-            Write-Host ">>> Downloading Daemons Gate CLI executable (dg.exe)..." -ForegroundColor Gray
-            $webClient.DownloadFile($exeUrl, $tmpExe)
+                $webClient = New-Object System.Net.WebClient
+                $webClient.Headers.Add("User-Agent", "DaemonsGate-Installer/1.0 (Windows NT; x64)")
 
-            # Validate Portable Executable (PE) Magic Header Bytes: 'MZ' (0x4D, 0x5A)
-            $fileStream = [System.IO.File]::OpenRead($tmpExe)
-            $b0 = $fileStream.ReadByte()
-            $b1 = $fileStream.ReadByte()
-            $fileStream.Close()
+                Write-Host ">>> Downloading SHA-256 integrity manifest..." -ForegroundColor Gray
+                $webClient.DownloadFile($sumUrl, $CandidateManifest)
 
-            if ($b0 -ne 0x4D -or $b1 -ne 0x5A) {
-                Write-Host ">>> Remote endpoint returned non-binary payload (HTML or error page). Rejecting." -ForegroundColor Yellow
-                Remove-Item -Force $tmpExe -ErrorAction SilentlyContinue
-                Remove-Item -Force $tmpSum -ErrorAction SilentlyContinue
-                continue
+                Write-Host ">>> Downloading Daemons Gate CLI executable (dg.exe)..." -ForegroundColor Gray
+                $webClient.DownloadFile($exeUrl, $CandidateExe)
+
+                $downloadSuccess = $true
+                Write-Host ">>> Download succeeded from $base" -ForegroundColor Green
+                break
+            } catch {
+                Write-Host ">>> Endpoint $base unavailable: $($_.Exception.Message)" -ForegroundColor Yellow
+                if (Test-Path $CandidateExe) { Remove-Item -Force $CandidateExe -ErrorAction SilentlyContinue }
+                if (Test-Path $CandidateManifest) { Remove-Item -Force $CandidateManifest -ErrorAction SilentlyContinue }
             }
-
-            Move-Item -Path $tmpExe -Destination $TargetExe -Force
-            Move-Item -Path $tmpSum -Destination $ChecksumFile -Force
-            $downloadSuccess = $true
-            Write-Host ">>> Download succeeded from $base" -ForegroundColor Green
-            break
-        } catch {
-            Write-Host ">>> Endpoint $base unavailable: $($_.Exception.Message)" -ForegroundColor Yellow
-            if (Test-Path "$TargetExe.tmp") { Remove-Item -Force "$TargetExe.tmp" -ErrorAction SilentlyContinue }
-            if (Test-Path "$ChecksumFile.tmp") { Remove-Item -Force "$ChecksumFile.tmp" -ErrorAction SilentlyContinue }
         }
     }
-}
 
-if (!$downloadSuccess) {
-    Write-Host "FATAL: Unable to download verified Daemons Gate release assets from any published endpoint." -ForegroundColor Red
-    Write-Host "  Checked endpoints:" -ForegroundColor Red
-    foreach ($base in $Endpoints) {
-        Write-Host "    - $base/dg.exe" -ForegroundColor Red
+    if (!$downloadSuccess) {
+        Write-Host "FATAL: Unable to download verified Daemons Gate release assets from any published endpoint." -ForegroundColor Red
+        Write-Host "  Checked endpoints:" -ForegroundColor Red
+        foreach ($base in $Endpoints) {
+            Write-Host "    - $base/dg.exe" -ForegroundColor Red
+        }
+        Write-Host "  Please verify your internet connection or visit https://arvindvincenzo.com/daemonsgate for support." -ForegroundColor Yellow
+        exit 1
     }
-    Write-Host "  Please verify your internet connection or visit https://arvindvincenzo.com/daemonsgate for support." -ForegroundColor Yellow
-    exit 1
-}
 
-# Strict SHA-256 verification against the signed manifest
-if (!(Test-Path $ChecksumFile)) {
-    Write-Host "FATAL: Checksum manifest missing! Rejecting unverified binary." -ForegroundColor Red
-    Remove-Item -Force $TargetExe -ErrorAction SilentlyContinue
-    exit 1
-}
+    # --------------------------------------------------------------------------
+    # CANDIDATE INTEGRITY VERIFICATION (Performed strictly on temporary files)
+    # Existing working installations remain untouched if any check fails.
+    # --------------------------------------------------------------------------
 
-$CalculatedHash = (Get-FileHash -Path $TargetExe -Algorithm SHA256).Hash.ToUpper()
-$ExpectedHash = $null
-
-$ManifestLines = Get-Content $ChecksumFile
-foreach ($line in $ManifestLines) {
-    $trimmed = $line.Trim()
-    if ($trimmed -match '^([A-Fa-f0-9]{64})\s+[*]?dg\.exe$') {
-        $ExpectedHash = $matches[1].ToUpper()
-        break
+    # 1. Non-empty file validation
+    if (!(Test-Path $CandidateExe) -or (Get-Item $CandidateExe).Length -lt 1024) {
+        Write-Host "FATAL: Candidate executable is missing or truncated." -ForegroundColor Red
+        exit 1
     }
-}
 
-if (!$ExpectedHash) {
-    Write-Host "FATAL: Checksum manifest does not contain a valid entry for dg.exe!" -ForegroundColor Red
-    Remove-Item -Force $TargetExe -ErrorAction SilentlyContinue
-    exit 1
-}
+    # 2. Portable Executable (PE) Magic Header Bytes: 'MZ' (0x4D, 0x5A)
+    $fileStream = [System.IO.File]::OpenRead($CandidateExe)
+    $b0 = $fileStream.ReadByte()
+    $b1 = $fileStream.ReadByte()
+    $fileStream.Close()
 
-if ($CalculatedHash -ne $ExpectedHash) {
-    Write-Host "FATAL: Checksum mismatch! Downloaded artifact may be corrupted or tampered." -ForegroundColor Red
-    Write-Host "  Expected:   $ExpectedHash" -ForegroundColor Red
-    Write-Host "  Calculated: $CalculatedHash" -ForegroundColor Red
-    Remove-Item -Force $TargetExe -ErrorAction SilentlyContinue
-    exit 1
-}
+    if ($b0 -ne 0x4D -or $b1 -ne 0x5A) {
+        Write-Host "FATAL: Downloaded artifact is not a valid Windows executable. Received non-binary payload (HTML or error page). Rejecting." -ForegroundColor Red
+        exit 1
+    }
 
-Write-Host ">>> Cryptographic integrity verified (SHA-256: $CalculatedHash)" -ForegroundColor Green
+    # 3. Strict SHA-256 manifest parsing
+    if (!(Test-Path $CandidateManifest) -or (Get-Item $CandidateManifest).Length -eq 0) {
+        Write-Host "FATAL: Checksum manifest is missing or empty! Rejecting candidate binary." -ForegroundColor Red
+        exit 1
+    }
 
-# Duplicate alias so user can invoke either 'dg' or 'daemons-gate'
-Copy-Item -Path $TargetExe -Destination $TargetAlias -Force
+    $ExpectedHash = $null
+    $ManifestLines = Get-Content $CandidateManifest
+    foreach ($line in $ManifestLines) {
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^([A-Fa-f0-9]{64})\s+[*]?dg\.exe$') {
+            $ExpectedHash = $matches[1].ToUpper()
+            break
+        }
+    }
 
-# Environment & PATH Configuration
-if (!$SkipPathRegistration) {
-    $UserProfile = $env:USERPROFILE
-    $CmdContent = "@echo off`r`n`"$TargetExe`" %*`r`n"
-    Set-Content -Path (Join-Path $UserProfile "dg.cmd") -Value $CmdContent
-    Set-Content -Path (Join-Path $UserProfile "daemons-gate.cmd") -Value $CmdContent
+    if (!$ExpectedHash) {
+        Write-Host "FATAL: Checksum manifest does not contain a valid 64-character SHA-256 entry for dg.exe!" -ForegroundColor Red
+        exit 1
+    }
 
-    $PsContent = "& `"$TargetExe`" `$args`r`n"
-    Set-Content -Path (Join-Path $UserProfile "dg.ps1") -Value $PsContent
-    Set-Content -Path (Join-Path $UserProfile "daemons-gate.ps1") -Value $PsContent
+    # 4. Hash verification against manifest
+    $CalculatedHash = (Get-FileHash -Path $CandidateExe -Algorithm SHA256).Hash.ToUpper()
+    if ($CalculatedHash -ne $ExpectedHash) {
+        Write-Host "FATAL: SHA-256 checksum mismatch! Downloaded artifact may be corrupted or tampered." -ForegroundColor Red
+        Write-Host "  Expected:   $ExpectedHash" -ForegroundColor Red
+        Write-Host "  Calculated: $CalculatedHash" -ForegroundColor Red
+        exit 1
+    }
 
-    # Register InstallDir into User PATH permanently in Registry
-    $RegKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
-    $CurrentPath = $RegKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    Write-Host ">>> SHA-256 checksum verified: $CalculatedHash" -ForegroundColor Green
 
-    $Parts = $CurrentPath -split ';' | Where-Object { $_ -ne "" }
-    if ($Parts -notcontains $InstallDir) {
-        $NewPath = ($Parts + $InstallDir) -join ';'
-        $RegKey.SetValue("Path", $NewPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
-        Write-Host ">>> Added $InstallDir to permanent User PATH." -ForegroundColor Green
+    # 5. Pre-flight execution sanity check on the candidate binary
+    $candidateVersion = ""
+    try {
+        $candidateVersion = (& "$CandidateExe" --version 2>&1).ToString().Trim()
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($candidateVersion)) {
+            Write-Host "FATAL: Candidate binary failed execution sanity check (Exit code $LASTEXITCODE)." -ForegroundColor Red
+            if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+            } else {
+                exit 1
+            }
+        }
+    } catch {
+        Write-Host "FATAL: Could not execute candidate binary for pre-flight verification: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+
+    # --------------------------------------------------------------------------
+    # SAFE ATOMIC REPLACEMENT & ALIAS CONFIGURATION
+    # --------------------------------------------------------------------------
+    if (!(Test-Path $InstallDir)) {
+        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    }
+
+    $BackupExe = "$TargetExe.bak"
+    if (Test-Path $TargetExe) {
+        Copy-Item -Path $TargetExe -Destination $BackupExe -Force
+    }
+
+    try {
+        Move-Item -Path $CandidateExe -Destination $TargetExe -Force
+        Copy-Item -Path $CandidateManifest -Destination $ChecksumFile -Force
+        Copy-Item -Path $TargetExe -Destination $TargetAlias -Force
+    } catch {
+        Write-Host "FATAL: Failed to install candidate executable: $($_.Exception.Message)" -ForegroundColor Red
+        if (Test-Path $BackupExe) {
+            Write-Host ">>> Restoring previous valid executable from backup..." -ForegroundColor Yellow
+            Copy-Item -Path $BackupExe -Destination $TargetExe -Force
+            Copy-Item -Path $TargetExe -Destination $TargetAlias -Force
+        }
+        exit 1
+    } finally {
+        if (Test-Path $BackupExe) {
+            Remove-Item -Force $BackupExe -ErrorAction SilentlyContinue
+        }
+    }
+
+    # --------------------------------------------------------------------------
+    # POST-INSTALLATION VERIFICATION & ENVIRONMENT REGISTRATION
+    # --------------------------------------------------------------------------
+    $installedVersion = ""
+    try {
+        $installedVersion = (& "$TargetExe" --version 2>&1).ToString().Trim()
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "FATAL: Installed binary returned non-zero exit code ($LASTEXITCODE) on post-install verification." -ForegroundColor Red
+            exit $LASTEXITCODE
+        }
+        Write-Host ">>> Installed CLI verified: $installedVersion" -ForegroundColor Green
+    } catch {
+        Write-Host "FATAL: Failed to execute installed binary at $($TargetExe): $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+
+    if (!$SkipPathRegistration) {
+        $UserProfile = $env:USERPROFILE
+        $CmdContent = "@echo off`r`n`"$TargetExe`" %*`r`n"
+        Set-Content -Path (Join-Path $UserProfile "dg.cmd") -Value $CmdContent
+        Set-Content -Path (Join-Path $UserProfile "daemons-gate.cmd") -Value $CmdContent
+
+        $PsContent = "& `"$TargetExe`" `$args`r`n"
+        Set-Content -Path (Join-Path $UserProfile "dg.ps1") -Value $PsContent
+        Set-Content -Path (Join-Path $UserProfile "daemons-gate.ps1") -Value $PsContent
+
+        # Register InstallDir into User PATH permanently in Registry
+        $RegKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+        $CurrentPath = $RegKey.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+
+        $Parts = $CurrentPath -split ';' | Where-Object { $_ -ne "" }
+        if ($Parts -notcontains $InstallDir) {
+            $NewPath = ($Parts + $InstallDir) -join ';'
+            $RegKey.SetValue("Path", $NewPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            Write-Host ">>> Added $InstallDir to permanent User PATH." -ForegroundColor Green
+        } else {
+            Write-Host ">>> $InstallDir is already in User PATH." -ForegroundColor Gray
+        }
+
+        # Update current session PATH
+        if ($env:Path -notlike "*$InstallDir*") {
+            $env:Path = "$env:Path;$InstallDir"
+        }
     } else {
-        Write-Host ">>> $InstallDir is already in User PATH." -ForegroundColor Gray
+        Write-Host ">>> Skipping PATH and root wrapper registration (-SkipPathRegistration enabled)." -ForegroundColor Gray
     }
 
-    # Update current session PATH
-    if ($env:Path -notlike "*$InstallDir*") {
-        $env:Path = "$env:Path;$InstallDir"
+    Write-Host ""
+    Write-Host ">>> Daemons Gate installation complete!" -ForegroundColor Green
+    Write-Host ">>> Run 'dg' or 'daemons-gate' in any terminal to launch." -ForegroundColor Cyan
+    Write-Host ">>> Documentation & access: https://arvindvincenzo.com/daemonsgate" -ForegroundColor Gray
+} finally {
+    # Ensure temporary workspace is completely cleaned up on success or failure
+    if (Test-Path $TempWorkspace) {
+        Remove-Item -Recurse -Force $TempWorkspace -ErrorAction SilentlyContinue
     }
-} else {
-    Write-Host ">>> Skipping PATH and root wrapper registration (-SkipPathRegistration enabled)." -ForegroundColor Gray
 }
-
-# Run final sanity check: execute CLI version
-try {
-    $verOutput = (& "$TargetExe" --version 2>&1).Trim()
-    Write-Host ">>> Verification check passed: $verOutput" -ForegroundColor Green
-} catch {
-    Write-Warning "Could not execute installed binary for version verification: $($_.Exception.Message)"
-}
-
-Write-Host ""
-Write-Host ">>> Daemons Gate installation complete!" -ForegroundColor Green
-Write-Host ">>> Run 'dg' or 'daemons-gate' in any terminal to launch." -ForegroundColor Cyan
-Write-Host ">>> Documentation & access: https://arvindvincenzo.com/daemonsgate" -ForegroundColor Gray

@@ -70,12 +70,13 @@ irm https://arvindvincenzo.com/install.ps1 | iex
 
 ### What this does:
 1. Connects securely to the Cloudflare distribution mirror at `https://arvindvincenzo.com/downloads`.
-2. Downloads `dg.exe` and the signed `SHA256SUMS.txt` manifest.
-3. Cryptographically verifies the binary's SHA-256 hash.
-4. Validates Portable Executable (`MZ`) magic header bytes.
-5. Deploys the CLI to `$HOME\.daemons-gate\bin\dg.exe` and creates `daemons-gate.exe` alias.
-6. Registers the binary in your permanent user `PATH`.
-7. Executes `dg --version` to confirm installation.
+2. Downloads `dg.exe` and the `SHA256SUMS.txt` integrity manifest into a temporary staging area.
+3. Validates Portable Executable (`MZ`) magic header bytes to ensure a valid binary was received.
+4. Verifies the candidate binary's SHA-256 hash strictly against the manifest.
+5. Performs a pre-flight execution check on the candidate before modifying any existing installation.
+6. Atomically installs the CLI to `$HOME\.daemons-gate\bin\dg.exe` (with automatic backup and rollback protection) and creates the `daemons-gate.exe` alias.
+7. Registers the binary in your permanent user `PATH`.
+8. Executes `dg --version` to confirm successful installation.
 
 For detailed instructions, manual verification, and advanced bootstrapper parameters, see the [Installation Guide](docs/INSTALLATION.md).
 
@@ -109,7 +110,7 @@ Follow the browser prompt to log in with the Google account associated with your
 
 ## 7. Artifact Verification & Security
 
-All official Daemons Gate binary artifacts are cryptographically signed and published through Cloudflare R2 with integrity manifests:
+Official Daemons Gate binary artifacts are published through Cloudflare R2 alongside SHA-256 integrity checksum manifests:
 
 - **Primary Binary Mirror:** `https://arvindvincenzo.com/downloads/dg.exe`
 - **Integrity Manifest:** `https://arvindvincenzo.com/downloads/SHA256SUMS.txt`
@@ -120,6 +121,8 @@ You can manually verify any downloaded binary at any time:
 (Get-FileHash "$HOME\.daemons-gate\bin\dg.exe" -Algorithm SHA256).Hash
 ```
 Compare the output against the published hash in `https://arvindvincenzo.com/downloads/SHA256SUMS.txt`.
+
+> **Note on Verification Scope:** SHA-256 checksum verification guarantees data integrity against transmission errors and incomplete downloads. Because the binary and manifest are hosted on the same official distribution infrastructure and delivered over HTTPS/TLS, this check verifies artifact completeness and consistency with the publisher's manifest, but does not represent an independent asymmetric digital signature (such as Windows Authenticode or GPG).
 
 ---
 

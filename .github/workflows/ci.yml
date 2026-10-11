@@ -11,14 +11,14 @@ permissions:
 
 jobs:
   validate-installer:
-    name: Validate PowerShell Bootstrapper
+    name: Validate PowerShell Bootstrapper & Regression Suite
     runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Parse PowerShell Script Syntax
-        shell: pwsh
+        shell: powershell
         run: |
           $scriptPath = (Resolve-Path "install.ps1").Path
           $tokens = $null
@@ -32,7 +32,7 @@ jobs:
           Write-Host "install.ps1 AST syntax parsed successfully with 0 errors." -ForegroundColor Green
 
       - name: Run PSScriptAnalyzer Linting
-        shell: pwsh
+        shell: powershell
         run: |
           Install-Module -Name PSScriptAnalyzer -Force -Scope CurrentUser
           $results = Invoke-ScriptAnalyzer -Path install.ps1 -Severity Error, Warning
@@ -46,43 +46,20 @@ jobs:
           }
           Write-Host "PSScriptAnalyzer analysis passed." -ForegroundColor Green
 
-      - name: Test Parameter Handling & Dry-Run
-        shell: pwsh
+      - name: Execute Full Installer Regression Test Suite
+        shell: powershell
         run: |
-          $tempDir = Join-Path $env:RUNNER_TEMP "dg_test_$(Get-Random)"
-          New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
-          
-          # Create mock staging executable with PE magic header 'MZ'
-          $mockExe = Join-Path $tempDir "mock_dg.exe"
-          $peBytes = [byte[]]@(0x4D, 0x5A, 0x90, 0x00, 0x03, 0x00)
-          [System.IO.File]::WriteAllBytes($mockExe, $peBytes)
-          
-          # Create corresponding SHA256SUMS.txt
-          $mockHash = (Get-FileHash $mockExe -Algorithm SHA256).Hash
-          "$mockHash  dg.exe" | Set-Content (Join-Path $tempDir "SHA256SUMS.txt")
-          
-          # Test local staging path with isolated install directory and skipped registry writes
-          $installTarget = Join-Path $tempDir "install_bin"
-          .\install.ps1 -UseLocalStaging -LocalSource $mockExe -InstallDir $installTarget -SkipPathRegistration
-          
-          $target = Join-Path $installTarget "dg.exe"
-          if (!(Test-Path $target)) {
-            Write-Error "Bootstrapper failed to deploy binary to target directory!"
-            exit 1
-          }
-          
-          Write-Host "Bootstrapper staging flow successfully verified in isolated CI sandbox." -ForegroundColor Green
-          Remove-Item -Recurse -Force $tempDir
+          powershell -ExecutionPolicy Bypass -File tests/installer.Tests.ps1
 
   validate-docs:
-    name: Validate Documentation Integrity
+    name: Validate Documentation Integrity & Disclaimers
     runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Validate Markdown References
-        shell: pwsh
+      - name: Validate Markdown References & Signature Claims
+        shell: powershell
         run: |
           $docFiles = @("README.md", "docs/INSTALLATION.md")
           foreach ($file in $docFiles) {
@@ -95,5 +72,9 @@ jobs:
               Write-Error "Documentation file $file does not contain canonical product website link!"
               exit 1
             }
+            if ($content -match '\b(cryptographically signed|digitally signed|signed SHA-256|signed binary|signed manifest)\b') {
+              Write-Error "File $file contains unsupported signature claim: '$($matches[1])'"
+              exit 1
+            }
           }
-          Write-Host "All documentation files present with canonical website links verified." -ForegroundColor Green
+          Write-Host "All documentation files validated with zero unsupported signature claims." -ForegroundColor Green

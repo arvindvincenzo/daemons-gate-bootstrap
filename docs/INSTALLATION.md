@@ -1,6 +1,6 @@
 # Daemons Gate — Installation & Verification Guide
 
-This guide covers installing, cryptographically verifying, troubleshooting, and uninstalling the **Daemons Gate** command-line interface (`dg`).
+This guide covers installing, verifying checksum integrity, troubleshooting, and uninstalling the **Daemons Gate** command-line interface (`dg`).
 
 - **Official Product Website:** [https://arvindvincenzo.com/daemonsgate](https://arvindvincenzo.com/daemonsgate)
 - **Official Download Mirror:** [https://arvindvincenzo.com/downloads/](https://arvindvincenzo.com/downloads/)
@@ -32,12 +32,13 @@ irm https://arvindvincenzo.com/install.ps1 | iex
 
 ### What the bootstrapper does:
 1. Connects to the secure Cloudflare-backed distribution endpoint (`https://arvindvincenzo.com/downloads`).
-2. Downloads the official `dg.exe` binary and signed `SHA256SUMS.txt` manifest.
-3. Validates Portable Executable (`MZ`) magic header bytes to ensure complete transmission.
-4. Cryptographically verifies the SHA-256 hash of the downloaded binary against the official manifest.
-5. Installs the binary into `$HOME\.daemons-gate\bin\dg.exe` and sets up `daemons-gate.exe` alias.
-6. Adds the installation directory to your permanent user `PATH` environment variable.
-7. Executes `dg --version` as a final verification check.
+2. Downloads the official `dg.exe` binary and the `SHA256SUMS.txt` integrity manifest into an isolated temporary staging directory.
+3. Validates Portable Executable (`MZ`) magic header bytes to ensure complete binary transmission (rejecting error/HTML payloads).
+4. Strictly parses the manifest and verifies the candidate binary's SHA-256 checksum before touching any installed files.
+5. Performs a pre-flight execution check on the candidate binary to confirm validity.
+6. Atomically installs the binary into `$HOME\.daemons-gate\bin\dg.exe` (with automatic backup and rollback preservation) and configures the `daemons-gate.exe` alias.
+7. Adds the installation directory to your permanent user `PATH` environment variable.
+8. Executes `dg --version` as a final verification check.
 
 ---
 
@@ -64,7 +65,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 ---
 
-## 4. Manual Download & Cryptographic Verification
+## 4. Manual Download & SHA-256 Checksum Verification
+
+> **Integrity Note:** SHA-256 checksum verification ensures your download is complete and free from corruption during transit. Since both the binary and manifest originate from the official distribution host over HTTPS/TLS, this provides transfer and integrity assurance, but does not constitute an independent asymmetric digital signature (such as Authenticode or GPG).
 
 If you prefer to download the binary manually without running an installer script:
 
