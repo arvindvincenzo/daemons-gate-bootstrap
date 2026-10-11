@@ -72,6 +72,45 @@ function Invoke-Installer {
     return @{ ExitCode = $LASTEXITCODE; Output = ($output | Out-String) }
 }
 
+function Invoke-InstallerWithCleanupFailure {
+    param(
+        [string[]]$ArgsList,
+        [string]$FailTarget = "dg.exe"
+    )
+    $fixtureScript = Join-Path $TestWorkspace "fixture_fail_cleanup.ps1"
+    $escapedInstaller = $InstallerPath -replace "'", "''"
+    $fixtureContent = @"
+function Remove-Item {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position=0, ValueFromPipeline=`$true)]
+        [string[]]`$Path,
+        [switch]`$Force,
+        [switch]`$Recurse
+    )
+    process {
+        if (`$Path) {
+            foreach (`$p in `$Path) {
+                if (`$p -like '*$FailTarget*') {
+                    throw [System.UnauthorizedAccessException] "Access to the path '`$p' is denied (injected by isolated test fixture)."
+                }
+            }
+        }
+        Microsoft.PowerShell.Management\Remove-Item @PSBoundParameters
+    }
+}
+
+`$invArgs = @(`$args)
+& '$escapedInstaller' @invArgs
+exit `$LASTEXITCODE
+"@
+    Set-Content -Path $fixtureScript -Value $fixtureContent
+
+    $allArgs = @("-ExecutionPolicy", "Bypass", "-File", $fixtureScript) + $ArgsList
+    $output = & powershell $allArgs 2>&1
+    return @{ ExitCode = $LASTEXITCODE; Output = ($output | Out-String) }
+}
+
 $TestResults = @()
 
 function Run-Test {
@@ -452,14 +491,13 @@ try {
         $candidateHash = (Get-FileHash $candidateSource -Algorithm SHA256).Hash
         "$candidateHash  dg.exe" | Set-Content (Join-Path $srcDir "SHA256SUMS.txt")
 
-        # Invoke installer simulating cleanup failure on newly created dg.exe during rollback
-        $res = Invoke-Installer @(
+        # Invoke installer through isolated test fixture intercepting Remove-Item on dg.exe
+        $res = Invoke-InstallerWithCleanupFailure -ArgsList @(
             "-UseLocalStaging",
             "-LocalSource", $candidateSource,
             "-InstallDir", $sandboxDir,
-            "-SkipPathRegistration",
-            "-SimulateRollbackCleanupFailure", "dg.exe"
-        )
+            "-SkipPathRegistration"
+        ) -FailTarget "dg.exe"
 
         # 1. Must exit non-zero
         if ($res.ExitCode -eq 0) {

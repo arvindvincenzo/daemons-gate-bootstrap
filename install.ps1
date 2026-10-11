@@ -17,8 +17,7 @@ param(
     [string]$LocalSource = "",
     [string]$CustomBaseUrl = "",
     [string]$InstallDir = "",
-    [switch]$SkipPathRegistration,
-    [string]$SimulateRollbackCleanupFailure = ""
+    [switch]$SkipPathRegistration
 )
 
 $ErrorActionPreference = "Stop"
@@ -267,11 +266,6 @@ try {
 
         $rollbackErrors = @()
 
-        $mockCleanupFail = $SimulateRollbackCleanupFailure
-        if ([string]::IsNullOrWhiteSpace($mockCleanupFail)) {
-            $mockCleanupFail = [System.Environment]::GetEnvironmentVariable("DG_TEST_INJECT_CLEANUP_FAILURE")
-        }
-
         # Rollback TargetExe
         try {
             if ($origState.TargetExeExists) {
@@ -285,9 +279,6 @@ try {
                     throw "Restored dg.exe checksum mismatch ($restoredHash vs expected $backupHash)."
                 }
             } else {
-                if ($mockCleanupFail -eq "1" -or $mockCleanupFail -eq "dg.exe") {
-                    throw "Simulated cleanup failure on dg.exe: Access is denied (injected for regression testing)"
-                }
                 if (Test-Path $TargetExe -PathType Leaf) {
                     Remove-Item -Force $TargetExe -ErrorAction Stop
                 }
@@ -312,9 +303,6 @@ try {
                     throw "Restored daemons-gate.exe alias checksum mismatch ($restoredHash vs expected $backupHash)."
                 }
             } else {
-                if ($mockCleanupFail -eq "daemons-gate.exe") {
-                    throw "Simulated cleanup failure on daemons-gate.exe: Access is denied (injected for regression testing)"
-                }
                 if (Test-Path $TargetAlias -PathType Leaf) {
                     Remove-Item -Force $TargetAlias -ErrorAction Stop
                 }
@@ -339,9 +327,6 @@ try {
                     throw "Restored SHA256SUMS.txt checksum mismatch ($restoredHash vs expected $backupHash)."
                 }
             } else {
-                if ($mockCleanupFail -eq "SHA256SUMS.txt") {
-                    throw "Simulated cleanup failure on SHA256SUMS.txt: Access is denied (injected for regression testing)"
-                }
                 if (Test-Path $ChecksumFile -PathType Leaf) {
                     Remove-Item -Force $ChecksumFile -ErrorAction Stop
                 }
