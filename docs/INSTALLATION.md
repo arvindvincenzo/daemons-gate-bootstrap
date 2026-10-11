@@ -36,7 +36,7 @@ irm https://arvindvincenzo.com/install.ps1 | iex
 3. Validates Portable Executable (`MZ`) magic header bytes to ensure complete binary transmission (rejecting error/HTML payloads).
 4. Strictly parses the manifest and verifies the candidate binary's SHA-256 checksum before touching any installed files.
 5. Performs a pre-flight execution check on the candidate binary to confirm validity.
-6. Atomically installs the binary into `$HOME\.daemons-gate\bin\dg.exe` (with automatic backup and rollback preservation) and configures the `daemons-gate.exe` alias.
+6. Safely deploys the binary into `$HOME\.daemons-gate\bin\dg.exe` within a recoverable transaction (with automatic backup and rollback preservation) and configures the `daemons-gate.exe` alias.
 7. Adds the installation directory to your permanent user `PATH` environment variable.
 8. Executes `dg --version` as a final verification check.
 

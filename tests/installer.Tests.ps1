@@ -25,6 +25,7 @@ New-Item -ItemType Directory -Force -Path $TestWorkspace | Out-Null
 
 $ValidMockExe = Join-Path $TestWorkspace "valid_mock_dg.exe"
 $FailingMockExe = Join-Path $TestWorkspace "failing_mock_dg.exe"
+$ConditionalMockExe = Join-Path $TestWorkspace "conditional_mock_dg.exe"
 
 $validAppCode = @"
 using System;
@@ -47,6 +48,22 @@ public class FailingApp {
 }
 "@
 Add-Type -TypeDefinition $failingAppCode -OutputAssembly $FailingMockExe -OutputType ConsoleApplication
+
+$conditionalAppCode = @"
+using System;
+public class ConditionalApp {
+    public static int Main(string[] args) {
+        string baseDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
+        if (baseDir.EndsWith("target_post_fail")) {
+            Console.WriteLine("Simulated failure during post-installation verification");
+            return 88;
+        }
+        Console.WriteLine("daemons-gate version 0.1.0 (candidate)");
+        return 0;
+    }
+}
+"@
+Add-Type -TypeDefinition $conditionalAppCode -OutputAssembly $ConditionalMockExe -OutputType ConsoleApplication
 
 function Invoke-Installer {
     param([string[]]$ArgsList)
@@ -248,9 +265,6 @@ try {
         if ($res.Output -match "Daemons Gate installation complete") {
             throw "Installer output reported installation complete despite version failure!"
         }
-        if (!(Test-Path (Join-Path $sandboxDir "dg.exe"))) {
-            # Note: since version check failed on candidate pre-flight, it should not be installed
-        }
     }
 
     # --------------------------------------------------------------------------
@@ -299,6 +313,111 @@ try {
         }
         if (!$installerContent.Contains('^([A-Fa-f0-9]{64})\s+[*]?dg\.exe$')) {
             throw "Installer missing strict 64-character SHA-256 regex"
+        }
+    }
+
+    # --------------------------------------------------------------------------
+    # TEST 11: Candidate passes pre-flight but fails post-install -> Rollback preserves original files byte-for-byte
+    # --------------------------------------------------------------------------
+    Run-Test "11. Post-installation check failure triggers transaction rollback and preserves original files byte-for-byte" {
+        $sandboxDir = Join-Path $TestWorkspace "test11_target_post_fail"
+        New-Item -ItemType Directory -Force -Path $sandboxDir | Out-Null
+        
+        # Pre-populate working existing installation
+        $origExe = Join-Path $sandboxDir "dg.exe"
+        $origAlias = Join-Path $sandboxDir "daemons-gate.exe"
+        $origManifest = Join-Path $sandboxDir "SHA256SUMS.txt"
+        
+        Copy-Item -Path $ValidMockExe -Destination $origExe -Force
+        Copy-Item -Path $ValidMockExe -Destination $origAlias -Force
+        "ORIGINAL_MANIFEST_CONTENT_12345  dg.exe" | Set-Content $origManifest
+        
+        $origExeBytes = [System.IO.File]::ReadAllBytes($origExe)
+        $origAliasBytes = [System.IO.File]::ReadAllBytes($origAlias)
+        $origManifestBytes = [System.IO.File]::ReadAllBytes($origManifest)
+
+        # Prepare candidate that passes pre-flight but fails post-install
+        $srcDir = Join-Path $TestWorkspace "test11_src"
+        New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
+        $candidateSource = Join-Path $srcDir "dg.exe"
+        Copy-Item -Path $ConditionalMockExe -Destination $candidateSource -Force
+        $candidateHash = (Get-FileHash $candidateSource -Algorithm SHA256).Hash
+        "$candidateHash  dg.exe" | Set-Content (Join-Path $srcDir "SHA256SUMS.txt")
+
+        $res = Invoke-Installer @("-UseLocalStaging", "-LocalSource", $candidateSource, "-InstallDir", $sandboxDir, "-SkipPathRegistration")
+
+        # 1. Installer must report failure
+        if ($res.ExitCode -eq 0) {
+            throw "Installer returned exit code 0 despite post-installation verification failure!"
+        }
+        if ($res.Output -match "Daemons Gate installation complete") {
+            throw "Installer reported installation complete despite post-installation verification failure!"
+        }
+        if ($res.Output -notmatch "rolled back to original state") {
+            throw "Installer output did not report transaction rollback: $($res.Output)"
+        }
+
+        # 2. Existing files must remain byte-for-byte identical
+        $afterExeBytes = [System.IO.File]::ReadAllBytes($origExe)
+        $afterAliasBytes = [System.IO.File]::ReadAllBytes($origAlias)
+        $afterManifestBytes = [System.IO.File]::ReadAllBytes($origManifest)
+
+        if ($origExeBytes.Length -ne $afterExeBytes.Length) { throw "dg.exe size changed after rollback" }
+        for ($i = 0; $i -lt $origExeBytes.Length; $i++) {
+            if ($origExeBytes[$i] -ne $afterExeBytes[$i]) { throw "dg.exe byte mismatch after rollback at index $i" }
+        }
+
+        if ($origAliasBytes.Length -ne $afterAliasBytes.Length) { throw "daemons-gate.exe size changed after rollback" }
+        for ($i = 0; $i -lt $origAliasBytes.Length; $i++) {
+            if ($origAliasBytes[$i] -ne $afterAliasBytes[$i]) { throw "daemons-gate.exe byte mismatch after rollback at index $i" }
+        }
+
+        if ($origManifestBytes.Length -ne $afterManifestBytes.Length) { throw "SHA256SUMS.txt size changed after rollback" }
+        for ($i = 0; $i -lt $origManifestBytes.Length; $i++) {
+            if ($origManifestBytes[$i] -ne $afterManifestBytes[$i]) { throw "SHA256SUMS.txt byte mismatch after rollback at index $i" }
+        }
+    }
+
+    # --------------------------------------------------------------------------
+    # TEST 12: Failure during file deployment triggers rollback of deployed files
+    # --------------------------------------------------------------------------
+    Run-Test "12. Failure during file deployment restores original state" {
+        $sandboxDir = Join-Path $TestWorkspace "test12_install"
+        New-Item -ItemType Directory -Force -Path $sandboxDir | Out-Null
+        
+        $origExe = Join-Path $sandboxDir "dg.exe"
+        Copy-Item -Path $ValidMockExe -Destination $origExe -Force
+        $origHash = (Get-FileHash $origExe -Algorithm SHA256).Hash
+        
+        # Make daemons-gate.exe a directory so Copy-Item fails when creating the alias
+        $aliasDir = Join-Path $sandboxDir "daemons-gate.exe"
+        New-Item -ItemType Directory -Force -Path $aliasDir | Out-Null
+        
+        $srcDir = Join-Path $TestWorkspace "test12_src"
+        New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
+        $srcExe = Join-Path $srcDir "dg.exe"
+        Copy-Item -Path $ConditionalMockExe -Destination $srcExe -Force
+        $srcHash = (Get-FileHash $srcExe -Algorithm SHA256).Hash
+        if ($srcHash -eq $origHash) {
+            throw "Test setup error: candidate hash matches original hash"
+        }
+        "$srcHash  dg.exe" | Set-Content (Join-Path $srcDir "SHA256SUMS.txt")
+
+        $res = Invoke-Installer @("-UseLocalStaging", "-LocalSource", $srcExe, "-InstallDir", $sandboxDir, "-SkipPathRegistration")
+        if ($res.ExitCode -eq 0) {
+            throw "Installer returned exit code 0 when alias deployment failed!"
+        }
+        if ($res.Output -notmatch "rolled back to original state") {
+            throw "Installer output did not report transaction rollback: $($res.Output)"
+        }
+        
+        # Verify original dg.exe was restored and candidate was not retained
+        $afterHash = (Get-FileHash $origExe -Algorithm SHA256).Hash
+        if ($afterHash -ne $origHash) {
+            throw "Original dg.exe was not restored after alias deployment failure!"
+        }
+        if ($afterHash -eq $srcHash) {
+            throw "Candidate binary was retained after rollback!"
         }
     }
 

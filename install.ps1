@@ -182,48 +182,130 @@ try {
     }
 
     # --------------------------------------------------------------------------
-    # SAFE ATOMIC REPLACEMENT & ALIAS CONFIGURATION
+    # TRANSACTIONAL REPLACEMENT WITH SAFE ROLLBACK
+    # All target files (dg.exe, daemons-gate.exe, SHA256SUMS.txt) are managed
+    # as a single recoverable transaction. If file copying or post-installation
+    # verification fails, the original state is restored.
     # --------------------------------------------------------------------------
     if (!(Test-Path $InstallDir)) {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     }
 
-    $BackupExe = "$TargetExe.bak"
-    if (Test-Path $TargetExe) {
-        Copy-Item -Path $TargetExe -Destination $BackupExe -Force
+    $TxBackupDir = Join-Path $TempWorkspace "tx_backup"
+    New-Item -ItemType Directory -Force -Path $TxBackupDir | Out-Null
+
+    $origState = @{
+        TargetExeExists    = (Test-Path $TargetExe -PathType Leaf)
+        TargetAliasExists  = (Test-Path $TargetAlias -PathType Leaf)
+        ChecksumFileExists = (Test-Path $ChecksumFile -PathType Leaf)
     }
 
-    try {
-        Move-Item -Path $CandidateExe -Destination $TargetExe -Force
-        Copy-Item -Path $CandidateManifest -Destination $ChecksumFile -Force
-        Copy-Item -Path $TargetExe -Destination $TargetAlias -Force
-    } catch {
-        Write-Host "FATAL: Failed to install candidate executable: $($_.Exception.Message)" -ForegroundColor Red
-        if (Test-Path $BackupExe) {
-            Write-Host ">>> Restoring previous valid executable from backup..." -ForegroundColor Yellow
-            Copy-Item -Path $BackupExe -Destination $TargetExe -Force
-            Copy-Item -Path $TargetExe -Destination $TargetAlias -Force
-        }
-        exit 1
-    } finally {
-        if (Test-Path $BackupExe) {
-            Remove-Item -Force $BackupExe -ErrorAction SilentlyContinue
-        }
+    $backupTargetExe = Join-Path $TxBackupDir "dg.exe.orig"
+    $backupTargetAlias = Join-Path $TxBackupDir "daemons-gate.exe.orig"
+    $backupChecksumFile = Join-Path $TxBackupDir "SHA256SUMS.txt.orig"
+
+    if ($origState.TargetExeExists) {
+        Copy-Item -Path $TargetExe -Destination $backupTargetExe -Force -ErrorAction Stop
+    }
+    if ($origState.TargetAliasExists) {
+        Copy-Item -Path $TargetAlias -Destination $backupTargetAlias -Force -ErrorAction Stop
+    }
+    if ($origState.ChecksumFileExists) {
+        Copy-Item -Path $ChecksumFile -Destination $backupChecksumFile -Force -ErrorAction Stop
     }
 
-    # --------------------------------------------------------------------------
-    # POST-INSTALLATION VERIFICATION & ENVIRONMENT REGISTRATION
-    # --------------------------------------------------------------------------
-    $installedVersion = ""
+    $transactionSucceeded = $false
+
     try {
-        $installedVersion = (& "$TargetExe" --version 2>&1).ToString().Trim()
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "FATAL: Installed binary returned non-zero exit code ($LASTEXITCODE) on post-install verification." -ForegroundColor Red
-            exit $LASTEXITCODE
+        # 1. Deploy candidate files into target directory
+        if (Test-Path $TargetExe -PathType Container) {
+            throw "Target executable destination is an existing directory: $TargetExe"
         }
+        Copy-Item -Path $CandidateExe -Destination $TargetExe -Force -ErrorAction Stop
+
+        if (Test-Path $ChecksumFile -PathType Container) {
+            throw "Target checksum destination is an existing directory: $ChecksumFile"
+        }
+        Copy-Item -Path $CandidateManifest -Destination $ChecksumFile -Force -ErrorAction Stop
+
+        if (Test-Path $TargetAlias -PathType Container) {
+            throw "Target alias destination is an existing directory: $TargetAlias"
+        }
+        Copy-Item -Path $CandidateExe -Destination $TargetAlias -Force -ErrorAction Stop
+
+        # 2. Run post-installation verification on the installed binary
+        $installedVersion = ""
+        $postCheckFailed = $false
+        $postCheckExitCode = 0
+
+        try {
+            $installedVersion = (& "$TargetExe" --version 2>&1).ToString().Trim()
+            if ($LASTEXITCODE -ne 0) {
+                $postCheckFailed = $true
+                $postCheckExitCode = $LASTEXITCODE
+            } elseif ([string]::IsNullOrWhiteSpace($installedVersion)) {
+                $postCheckFailed = $true
+                $postCheckExitCode = 1
+            }
+        } catch {
+            $postCheckFailed = $true
+            $postCheckExitCode = 1
+        }
+
+        if ($postCheckFailed) {
+            throw "Installed executable failed post-installation verification (Exit code $postCheckExitCode)."
+        }
+
+        $transactionSucceeded = $true
         Write-Host ">>> Installed CLI verified: $installedVersion" -ForegroundColor Green
+
     } catch {
-        Write-Host "FATAL: Failed to execute installed binary at $($TargetExe): $($_.Exception.Message)" -ForegroundColor Red
+        $failureReason = $_.Exception.Message
+        Write-Host "FATAL: Installation transaction failed: $failureReason" -ForegroundColor Red
+        Write-Host ">>> Initiating safe transaction rollback..." -ForegroundColor Yellow
+
+        $rollbackErrors = @()
+
+        # Rollback TargetExe
+        try {
+            if ($origState.TargetExeExists) {
+                Copy-Item -Path $backupTargetExe -Destination $TargetExe -Force -ErrorAction Stop
+            } else {
+                if (Test-Path $TargetExe -PathType Leaf) { Remove-Item -Force $TargetExe -ErrorAction SilentlyContinue }
+            }
+        } catch {
+            $rollbackErrors += "Failed to restore dg.exe: $($_.Exception.Message)"
+        }
+
+        # Rollback TargetAlias
+        try {
+            if ($origState.TargetAliasExists) {
+                Copy-Item -Path $backupTargetAlias -Destination $TargetAlias -Force -ErrorAction Stop
+            } else {
+                if (Test-Path $TargetAlias -PathType Leaf) { Remove-Item -Force $TargetAlias -ErrorAction SilentlyContinue }
+            }
+        } catch {
+            $rollbackErrors += "Failed to restore daemons-gate.exe alias: $($_.Exception.Message)"
+        }
+
+        # Rollback ChecksumFile
+        try {
+            if ($origState.ChecksumFileExists) {
+                Copy-Item -Path $backupChecksumFile -Destination $ChecksumFile -Force -ErrorAction Stop
+            } else {
+                if (Test-Path $ChecksumFile -PathType Leaf) { Remove-Item -Force $ChecksumFile -ErrorAction SilentlyContinue }
+            }
+        } catch {
+            $rollbackErrors += "Failed to restore SHA256SUMS.txt: $($_.Exception.Message)"
+        }
+
+        if ($rollbackErrors.Count -gt 0) {
+            Write-Host "FATAL: Rollback encountered errors:" -ForegroundColor Red
+            $rollbackErrors | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+        } else {
+            Write-Host ">>> Transaction successfully rolled back to original state." -ForegroundColor Yellow
+        }
+
         exit 1
     }
 
